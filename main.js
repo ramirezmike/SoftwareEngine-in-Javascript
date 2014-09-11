@@ -1,5 +1,6 @@
 var canvas;
 var device;
+var previousDate = Date.now();
 var meshes = [];
 var camera;
 
@@ -20,17 +21,22 @@ function loadJSONCompleted(meshesLoaded) {
 }
 
 function drawingLoop() {
+    handleFPS();
     device.clear();
 
     for (var i = 0; i < meshes.length; i++) {
-        meshes[i].Rotation.y += 0.01;
-        meshes[i].Scaling.x = 3;
-        meshes[i].Scaling.y = 3;
-        meshes[i].Scaling.z = 3;
+        meshes[i].Rotation.y -= 0.01;
     }
 
     device.render(camera, meshes);
     device.present();
 
     requestAnimationFrame(drawingLoop);
+}
+
+function handleFPS() {
+   var fpscontainer = document.getElementById("fpsContainer");
+   var now = Date.now();
+   fpscontainer.textContent = 1000 / (now - previousDate);
+   previousDate = now;
 }

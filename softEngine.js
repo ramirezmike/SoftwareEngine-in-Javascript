@@ -79,7 +79,15 @@ var SoftEngine;
                     var x = verticesArray[index * verticesStep];
                     var y = verticesArray[index * verticesStep + 1];
                     var z = verticesArray[index * verticesStep + 2];
-                    mesh.Vertices[index] = new BABYLON.Vector3(x, y, z);
+                    // loading normals
+                    var nx = verticesArray[index * verticesStep + 3];
+                    var ny = verticesArray[index * verticesStep + 4];
+                    var nz = verticesArray[index * verticesStep + 5];
+                    mesh.Vertices[index] = {
+                        Coordinates: new BABYLON.Vector3(x, y, z),
+                        Normal: new BABYLON.Vector3(nx, ny, nz),
+                        WorldCoordinates: null
+                    };
                 }
 
                 // Faces
@@ -132,12 +140,19 @@ var SoftEngine;
        	};
 
 
-       	Device.prototype.project = function(coord, transMat) {
-       	    var point = BABYLON.Vector3.TransformCoordinates(coord, transMat);
-       	    var x = point.x * this.workingWidth + this.workingWidth / 2.0;
-       	    var y = -point.y * this.workingHeight + this.workingHeight / 2.0;
+       	Device.prototype.project = function(vertex, transMat, world) {
+       	    var point2d = BABYLON.Vector3.TransformCoordinates(vertex.Coordinates, transMat);
+       	    var point3dWorld = BABYLON.Vector3.TransformCoordinates(vertex.Coordinates, world);
+       	    var normal3dWorld = BABYLON.Vector3.TransformCoordinates(vertex.Normal, world);
 
-       	    return (new BABYLON.Vector3(x, y, point.z));
+       	    var x = point2d.x * this.workingWidth + this.workingWidth / 2.0;
+       	    var y = -point2d.y * this.workingHeight + this.workingHeight / 2.0;
+
+       	    return ({
+             Coordinates: new BABYLON.Vector3(x, y, point2d.z),
+             Normal: normal3dWorld,
+             WorldCoordinates: point3dWorld
+            });
        	}
 
         Device.prototype.clamp = function(value, min, max) {
@@ -152,9 +167,14 @@ var SoftEngine;
 
         // papb -> pcpd
         // Y is used to compute gradient to get starting X (sx) and ending X (ex)
-        Device.prototype.processScanLine = function(y, pa, pb, pc, pd, color) {
-            var gradient1 = pa.y != pb.y ? (y - pa.y) / (pb.y - pa.y) : 1;
-            var gradient2 = pc.y != pd.y ? (y - pc.y) / (pd.y - pc.y) : 1;
+        Device.prototype.processScanLine = function(data, va, vb, vc, vd, color) {
+            var pa = va.Coordinates,
+                pb = vb.Coordinates,
+                pc = vc.Coordinates,
+                pd = vd.Coordinates;
+
+            var gradient1 = pa.y != pb.y ? (data.currentY - pa.y) / (pb.y - pa.y) : 1;
+            var gradient2 = pc.y != pd.y ? (data.currentY - pc.y) / (pd.y - pc.y) : 1;
 
             var sx = this.interpolate(pa.x, pb.x, gradient1) >> 0;
             var ex = this.interpolate(pc.x, pd.x, gradient2) >> 0;
@@ -165,27 +185,52 @@ var SoftEngine;
             for (var x = sx; x < ex; x++) {
                 var gradient = (x - sx) / (ex - sx);
                 var z = this.interpolate(z1, z2, gradient);
-                this.drawPoint(new BABYLON.Vector3(x, y, z), color);
+                var ndotl = data.ndotla;
+                this.drawPoint(new BABYLON.Vector3(x, data.currentY, z),
+                               new BABYLON.Color4(color.r * ndotl, color.g * ndotl,
+                                                  color.b * ndotl, 1));
             }
         };
 
-        Device.prototype.drawTriangle = function(p1, p2, p3, color) {
+        Device.prototype.computeNDotL = function(vertex, normal, lightPosition) {
+            var lightDirection = lightPosition.subtract(vertex);
+
+            normal.normalize();
+            lightDirection.normalize();
+
+            return Math.max(0, BABYLON.Vector3.Dot(normal, lightDirection));
+        }
+
+        Device.prototype.drawTriangle = function(v1, v2, v3, color) {
             // Sort points to p1 always up and p2 between p1 and p3
-            if (p1.y > p2.y) {
-                var temp = p2;
-                p2 = p1;
-                p1 = temp;
+            if (v1.Coordinates.y > v2.Coordinates.y) {
+                var temp = v2;
+                v2 = v1;
+                v1 = temp;
             }
-            if (p2.y > p3.y) {
-                var temp = p2;
-                p2 = p3;
-                p3 = temp;
+            if (v2.Coordinates.y > v3.Coordinates.y) {
+                var temp = v2;
+                v2 = v3;
+                v3 = temp;
             }
-            if (p1.y > p2.y) {
-                var temp = p2;
-                p2 = p1;
-                p1 = temp;
+            if (v1.Coordinates.y > v2.Coordinates.y) {
+                var temp = v2;
+                v2 = v1;
+                v1 = temp;
             }
+
+            var p1 = v1.Coordinates,
+                p2 = v2.Coordinates,
+                p3 = v3.Coordinates;
+
+            var vnFace = (v1.Normal.add(v2.Normal.add(v3.Normal))).scale(1/3);
+            var centerPoint = (v1.WorldCoordinates.add(v2.WorldCoordinates.add(v3.WorldCoordinates))).scale(1/3);
+
+            var lightPosition = new BABYLON.Vector3(-50, 0, 0);
+
+            var ndotl = this.computeNDotL(centerPoint, vnFace, lightPosition);
+
+            var data = { ndotla: ndotl };
 
             // inverse slopes
             var dP1P2, dP1P3;
@@ -206,21 +251,25 @@ var SoftEngine;
 
             if (dP1P2 > dP1P3) {
                 for (var y = p1.y >> 0; y <= p3.y >> 0; y++) {
+                    data.currentY = y;
+
                     if (y < p2.y) {
-                        this.processScanLine(y, p1, p3, p1, p2, color);
+                        this.processScanLine(data, v1, v3, v1, v2, color);
                     }
                     else {
-                        this.processScanLine(y, p1, p3, p2, p3, color);
+                        this.processScanLine(data, v1, v3, v2, v3, color);
                     }
                 }
             }
             else {
                 for (var y = p1.y >> 0; y <= p3.y >> 0; y++) {
+                    data.currentY = y;
+
                     if (y < p2.y) {
-                        this.processScanLine(y, p1, p2, p1, p3, color);
+                        this.processScanLine(data, v1, v2, v1, v3, color);
                     }
                     else {
-                        this.processScanLine(y, p2, p3, p1, p3, color);
+                        this.processScanLine(data, v2, v3, v1, v3, color);
                     }
                 }
             }
@@ -292,9 +341,9 @@ var SoftEngine;
                         var vertexB = currentMesh.Vertices[currentFace.B];
                         var vertexC = currentMesh.Vertices[currentFace.C];
 
-                        var pixelA = this.project(vertexA, transformMatrix);
-                        var pixelB = this.project(vertexB, transformMatrix);
-                        var pixelC = this.project(vertexC, transformMatrix);
+                        var pixelA = this.project(vertexA, transformMatrix, worldMatrix);
+                        var pixelB = this.project(vertexB, transformMatrix, worldMatrix);
+                        var pixelC = this.project(vertexC, transformMatrix, worldMatrix);
 
                         var color = 0.25 + ((indexFaces % currentMesh.Faces.length) / currentMesh.Faces.length) * 0.75;
                         this.drawTriangle(pixelA, pixelB, pixelC, new BABYLON.Color4(color, color, color, 1));
